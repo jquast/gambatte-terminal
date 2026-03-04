@@ -160,6 +160,7 @@ def run(
     cpr_bytes_in_sweep = 0
     frame_size_fast_ema: float = _CONSERVATIVE_FRAME_BYTES
     frame_size_slow_ema: float = _CONSERVATIVE_FRAME_BYTES
+    last_overhead: float = 1.0  # assume BW-limited until proven otherwise
     if cpr_bandwidth_bps > 0 and cpr_rtt_floor > 0:
         sweep_budget = cpr_bandwidth_bps * cpr_rtt_floor * _SWEEP_WINDOW / 8
         frames_per_sweep = max(1, int(sweep_budget / _CONSERVATIVE_FRAME_BYTES))
@@ -209,6 +210,7 @@ def run(
                     if cpr_bytes_in_sweep > 0 and cpr_rtt_floor > 0:
                         # Subtract RTT floor to isolate transmission time
                         overhead = elapsed - cpr_rtt_floor
+                        last_overhead = overhead
                         if live_stats is not None:
                             live_stats.sweep_tx_ms = max(0.0, overhead * 1000)
                         if overhead > _MIN_OVERHEAD_S:
@@ -304,14 +306,16 @@ def run(
                 if use_cpr_sync and fast_bw_ema > 0:
                     capped_bw = min(fast_bw_ema, max_bw_bps) if max_bw_bps > 0 else fast_bw_ema
                     bw_bytes_per_sec = capped_bw / 8
-                    mean_bytes = frame_size_slow_ema
+                    mean_bytes = frame_size_fast_ema
                     bw_fps_cap = bw_bytes_per_sec / mean_bytes
                     target_fps_for_pacing = min(fps / frame_advance, bw_fps_cap)
                     slot_bytes = int(bw_bytes_per_sec / target_fps_for_pacing)
-                    nul_count = max(0, slot_bytes - len(video_data))
-                    if nul_count > 0:
-                        write_bytes(app_session, bytes(nul_count))
-                        cpr_bytes_in_sweep += nul_count
+                    nul_count = 0
+                    if last_overhead > 0:  # only pad in BW-limited regime
+                        nul_count = max(0, slot_bytes - len(video_data))
+                        if nul_count > 0:
+                            write_bytes(app_session, bytes(nul_count))
+                            cpr_bytes_in_sweep += nul_count
                     if live_stats is not None:
                         live_stats.nul_pad_last = nul_count
                 # Send CPR request
@@ -349,11 +353,13 @@ def run(
             audio_percent = sum(audio_deltas) / len(audio_deltas) * total_fps * 100
             video_percent = sum(video_deltas) / len(video_deltas) * total_fps * 100
             data_rate = sum(data_length) / len(data_length) * total_fps / 1000
+            max_jitter_ms = max(abs(s) for s in shifting) * 1000 if shifting else 0.0
             title = f"Gambaterm - {total_fps:.0f} FPS | "
             title += f"{os.path.basename(console.romfile)} | "
             title += f"Emu: {emu_fps:.0f} FPS - {emu_percent:.0f}% CPU | "
             title += f"Video: {video_fps:.0f} FPS - {video_percent:.0f}% CPU - "
             title += f"{data_rate:.0f} KB/s | "
+            title += f"Jitter: {max_jitter_ms:.0f}ms | "
             title += f"Audio: {audio_percent:.0f}% CPU"
             app_session.output.set_title(title)
             app_session.output.flush()
