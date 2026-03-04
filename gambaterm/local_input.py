@@ -70,12 +70,11 @@ def local_blessed_input_context(
             buf = buf[consumed:]
             if ks.name == "RESIZE_EVENT":
                 continue
-            ch = str(ks)
-            if ch == "\x03":
+            if ks.name == "KEY_CTRL_C" or str(ks) == "\x03":
                 raise KeyboardInterrupt
-            if ch == "\x04":
+            if ks.name == "KEY_CTRL_D" or str(ks) == "\x04":
                 raise EOFError
-            kitty_detected = _map_keystroke(ks, state, kitty_detected)
+            kitty_detected = _map_keystroke(ks, state, kitty_detected, codes)
 
         for event in state.pop_events():
             console.handle_event(event)

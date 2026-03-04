@@ -135,48 +135,72 @@ def _map_keystroke(
     ks: Any,
     state: TelnetInputState,
     kitty_detected: bool,
+    codes: dict[int, str],
 ) -> bool:
     """Map a blessed Keystroke to input state updates.
 
+    Handles both legacy (non-kitty) terminals and kitty keyboard protocol.
+    For kitty terminals, ``ks.uses_keyboard_protocol`` is True and we receive
+    explicit press/repeat/release events; for legacy terminals we rely on
+    auto-expiring hold timers refreshed by OS key-repeat events.
+
+    :param ks: resolved blessed Keystroke
+    :param state: shared input state to update
+    :param kitty_detected: whether kitty protocol has been seen this session
+    :param codes: blessed ``_keycodes`` mapping (int code → key name string)
     :returns: updated kitty_detected flag
     """
-    name = ks.name
-
-    # Check for kitty protocol release events
-    if hasattr(ks, 'released') and ks.released:
+    # Kitty explicit release — immediately clear the button.
+    if ks.uses_keyboard_protocol and ks.released:
         kitty_detected = True
-        button = _get_button(ks)
+        button = _get_button(ks, codes)
         if button is not None:
             state.release(button)
         return kitty_detected
 
-    # Determine hold duration based on protocol
-    if hasattr(ks, 'released'):
-        # Kitty press/repeat event — we have explicit releases, use long hold
-        # so that multi-key chords don't expire while OS repeat is suppressed.
+    # Determine hold duration.
+    # Kitty gives us explicit releases, so we hold for a long time and rely on
+    # those.  OS key-repeat suppresses repeats for earlier keys while a second
+    # key is held, so a short timeout causes premature release of multi-key
+    # chords on legacy terminals.
+    if ks.uses_keyboard_protocol:
         kitty_detected = True
         hold = KITTY_CONFIRMED_HOLD
     elif kitty_detected:
+        # Kitty terminal sending a legacy-format press (report_events without
+        # disambiguate): we still have explicit releases, so hold long.
         hold = KITTY_CONFIRMED_HOLD
     else:
         hold = HOLD_DURATION
 
-    # Named key (arrows, enter, tab, etc.)
+    # Named key: arrows, enter, tab …
+    # Kitty repeat events carry a _REPEATED suffix; strip it to find the base name.
+    name = ks.name
     if name:
-        button = KEY_INPUT_MAP.get(name)
+        base = name.removesuffix("_REPEATED")
+        button = KEY_INPUT_MAP.get(base)
         if button is not None:
             state.press(button, hold)
             return kitty_detected
 
-    # Character input
-    char = str(ks)
+    # Kitty press with event_type=1 has name=None but _code identifies the key.
+    if ks.uses_keyboard_protocol and ks._code is not None:
+        base_name = codes.get(ks._code)
+        if base_name:
+            button = KEY_INPUT_MAP.get(base_name)
+            if button is not None:
+                state.press(button, hold)
+                return kitty_detected
+
+    # Character input.
+    # Kitty encodes characters in ks.value (works for press and repeat);
+    # legacy terminals expose the character via str(ks) when len == 1.
+    char = ks.value if ks.uses_keyboard_protocol else str(ks)
     if len(char) == 1:
-        # Event keys (0-9, k, l)
         event = CHAR_EVENT_MAP.get(char)
         if event is not None:
             state.queue_event(event)
             return kitty_detected
-        # Input buttons (f, v, space, d, c)
         button = CHAR_INPUT_MAP.get(char)
         if button is not None:
             state.press(button, hold)
@@ -185,14 +209,53 @@ def _map_keystroke(
     return kitty_detected
 
 
-def _get_button(ks: Any) -> Console.Input | None:
-    """Get the Console.Input button for a keystroke, if any."""
+def _get_button(ks: Any, codes: dict[int, str]) -> Console.Input | None:
+    """Return the :class:`Console.Input` button for a keystroke, or ``None``.
+
+    Handles both kitty-protocol and legacy keystrokes, including kitty's
+    ``_REPEATED``/``_RELEASED`` name suffixes and character-key releases where
+    ``ks.value`` is empty but ``ks._match.unicode_key`` carries the codepoint.
+
+    :param ks: resolved blessed Keystroke
+    :param codes: blessed ``_keycodes`` mapping (int code → key name string)
+    """
+    # Named key — strip kitty event-type suffixes before lookup.
     name = ks.name
     if name:
-        return KEY_INPUT_MAP.get(name)
+        for suffix in ("_REPEATED", "_RELEASED"):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+                break
+        button = KEY_INPUT_MAP.get(name)
+        if button is not None:
+            return button
+
+    # Kitty press with event_type=1: name is None but _code identifies the key.
+    if ks.uses_keyboard_protocol and ks._code is not None:
+        base_name = codes.get(ks._code)
+        if base_name:
+            button = KEY_INPUT_MAP.get(base_name)
+            if button is not None:
+                return button
+
+    # Character keys via kitty protocol.
+    # ks.value is 'f' for press/repeat but '' for release; fall back to
+    # _match.unicode_key (printable ASCII range) for release events.
+    if ks.uses_keyboard_protocol:
+        char = ks.value
+        if not char:
+            match = getattr(ks, "_match", None)
+            unicode_key = getattr(match, "unicode_key", None)
+            if unicode_key is not None and 32 <= unicode_key <= 126:
+                char = chr(unicode_key)
+        if char and len(char) == 1:
+            return CHAR_INPUT_MAP.get(char)
+
+    # Legacy plain character.
     char = str(ks)
     if len(char) == 1:
         return CHAR_INPUT_MAP.get(char)
+
     return None
 
 
@@ -249,7 +312,7 @@ async def read_telnet_input(
                 if consumed == 0:
                     break
                 buf = buf[consumed:]
-                kitty_detected = _map_keystroke(ks, state, kitty_detected)
+                kitty_detected = _map_keystroke(ks, state, kitty_detected, codes)
     except (asyncio.CancelledError, ConnectionError, EOFError):
         pass
     finally:
