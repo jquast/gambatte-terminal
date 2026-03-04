@@ -7,7 +7,7 @@ import statistics
 import contextlib
 from itertools import count
 from collections import deque
-from typing import Deque, Iterator
+from typing import Any, Deque, Iterator
 
 import numpy as np
 from prompt_toolkit.application import AppSession
@@ -84,6 +84,7 @@ def run(
     cycle_color_on_ctrl_c: bool = False,
     cpr_rtt_floor: float = 0.0,
     cpr_bandwidth_bps: float = 0.0,
+    live_stats: Any = None,
 ) -> None:
     assert color_mode > 0
 
@@ -184,26 +185,29 @@ def run(
                 raise OSError
             if event.key == "<cursor-position-response>":
                 screen_ready = True
-                if (cpr_sent_at is not None and cpr_bytes_in_sweep > 0
-                        and cpr_rtt_floor > 0 and cpr_bandwidth_bps > 0):
+                if cpr_sent_at is not None:
                     elapsed = time.perf_counter() - cpr_sent_at
-                    # Subtract RTT floor to isolate transmission time
-                    overhead = elapsed - cpr_rtt_floor
-                    if overhead > _MIN_OVERHEAD_S:
-                        meas = cpr_bytes_in_sweep * 8 / overhead
-                        # Dual-EWMA: fast reacts to drops, slow tracks sustained BW
-                        fast_bw_ema = (1 - _FAST_EMA_ALPHA) * fast_bw_ema + _FAST_EMA_ALPHA * meas
-                        slow_bw_ema = (1 - _SLOW_EMA_ALPHA) * slow_bw_ema + _SLOW_EMA_ALPHA * meas
-                        # Use the lower of the two EMAs for a conservative estimate
-                        safe_bw = min(fast_bw_ema, slow_bw_ema) * _SAFETY_FACTOR
-                        sweep_budget = safe_bw * cpr_rtt_floor * _SWEEP_WINDOW / 8
-                        if frame_size_history:
-                            mean_dl = statistics.mean(frame_size_history)
-                            stdev_dl = (statistics.stdev(frame_size_history)
-                                        if len(frame_size_history) > 1 else mean_dl)
-                            # p95 approximation: absorbs VBR burst frames
-                            p95 = mean_dl + _FRAME_SIZE_P95_SIGMAS * stdev_dl
-                            frames_per_sweep = max(1, int(sweep_budget / p95))
+                    if live_stats is not None:
+                        live_stats.rtt_ms = elapsed * 1000
+                    if (cpr_bytes_in_sweep > 0
+                            and cpr_rtt_floor > 0 and cpr_bandwidth_bps > 0):
+                        # Subtract RTT floor to isolate transmission time
+                        overhead = elapsed - cpr_rtt_floor
+                        if overhead > _MIN_OVERHEAD_S:
+                            meas = cpr_bytes_in_sweep * 8 / overhead
+                            # Dual-EWMA: fast reacts to drops, slow tracks sustained BW
+                            fast_bw_ema = (1 - _FAST_EMA_ALPHA) * fast_bw_ema + _FAST_EMA_ALPHA * meas
+                            slow_bw_ema = (1 - _SLOW_EMA_ALPHA) * slow_bw_ema + _SLOW_EMA_ALPHA * meas
+                            # Use the lower of the two EMAs for a conservative estimate
+                            safe_bw = min(fast_bw_ema, slow_bw_ema) * _SAFETY_FACTOR
+                            sweep_budget = safe_bw * cpr_rtt_floor * _SWEEP_WINDOW / 8
+                            if frame_size_history:
+                                mean_dl = statistics.mean(frame_size_history)
+                                stdev_dl = (statistics.stdev(frame_size_history)
+                                            if len(frame_size_history) > 1 else mean_dl)
+                                # p95 approximation: absorbs VBR burst frames
+                                p95 = mean_dl + _FRAME_SIZE_P95_SIGMAS * stdev_dl
+                                frames_per_sweep = max(1, int(sweep_budget / p95))
                 frames_since_cpr = 0
                 cpr_bytes_in_sweep = 0
                 cpr_sent_at = None
@@ -283,6 +287,8 @@ def run(
             emu_fps = tps * len(ticks) / sum(ticks)
             video_fps = emu_fps * sum(shown_frames) / len(shown_frames)
             total_fps = len(total_deltas) / sum(total_deltas)
+            if live_stats is not None:
+                live_stats.fps = total_fps
             emu_percent = sum(emu_deltas) / len(emu_deltas) * total_fps * 100
             audio_percent = sum(audio_deltas) / len(audio_deltas) * total_fps * 100
             video_percent = sum(video_deltas) / len(video_deltas) * total_fps * 100

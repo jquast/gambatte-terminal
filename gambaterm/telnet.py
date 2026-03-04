@@ -4,6 +4,7 @@ import time
 import hashlib
 import asyncio
 import argparse
+import dataclasses
 import traceback
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,6 +21,23 @@ from .console import Console, InputGetter, GameboyColor
 from .telnet_input import TelnetInputState, read_telnet_input
 
 from .telnet_app_session import telnet_to_app_session
+
+
+_COLOR_LABELS: dict[ColorMode, str] = {
+    ColorMode.HAS_24_BIT_COLOR: "24bit",
+    ColorMode.HAS_8_BIT_COLOR: "256",
+    ColorMode.HAS_4_BIT_COLOR: "16",
+    ColorMode.HAS_2_BIT_COLOR: "4",
+    ColorMode.NO_COLOR: "none",
+}
+
+
+@dataclasses.dataclass
+class _LiveStats:
+    """Live per-connection stats shared between the emulator thread and the stats coroutine."""
+
+    fps: float = 0.0
+    rtt_ms: float = 0.0
 
 
 @contextmanager
@@ -59,6 +77,7 @@ def thread_target(
     input_state: TelnetInputState | None = None,
     rtt_floor: float = 0.0,
     bandwidth_bps: float = 0.0,
+    live_stats: _LiveStats | None = None,
 ) -> int:
     # Create save directory for user
     if app_config.input_file is None:
@@ -100,6 +119,7 @@ def thread_target(
                 cycle_color_on_ctrl_c=True,
                 cpr_rtt_floor=rtt_floor,
                 cpr_bandwidth_bps=bandwidth_bps,
+                live_stats=live_stats,
             )
         except (KeyboardInterrupt, OSError):
             return 0
@@ -301,6 +321,7 @@ async def _log_connection_stats(
     writer: object,
     peer_host: str,
     peer_port: int,
+    live_stats: _LiveStats | None = None,
     interval: float = 30.0,
     idle_timeout: float = 300.0,
 ) -> None:
@@ -342,12 +363,16 @@ async def _log_connection_stats(
             uptime = f"{hours}h{minutes:02d}m{secs:02d}s" if hours else f"{minutes}m{secs:02d}s"
 
             idle_str = f" (idle {_fmt_idle(idle_duration)})" if idle_duration >= 1.0 else ""
+            fps_str = f", {live_stats.fps:.0f} FPS" if live_stats and live_stats.fps > 0 else ""
+            rtt_str = (
+                f", RTT {live_stats.rtt_ms:.1f}ms" if live_stats and live_stats.rtt_ms > 0 else ""
+            )
 
             print(
                 f"[Stats {peer_host}:{peer_port}] "
                 f"up {uptime}, "
                 f"tx {tx:,}B ({tx_mbps:.3f}/{avg_tx_mbps:.3f} Mbit/s)"
-                f"{idle_str}"
+                f"{fps_str}{rtt_str}{idle_str}"
             )
 
             if idle_duration >= idle_timeout:
@@ -450,16 +475,18 @@ async def _telnet_shell(
             )
 
         height, width = app_session.output.get_size()
+        color_label = _COLOR_LABELS.get(color_mode, str(int(color_mode)))
         print(
             "[Terminal Info] "
-            f"{peer_host}: {terminal_type}, {color_mode}, {width}x{height}"
+            f"{peer_host}: {terminal_type}, {color_label}, {width}x{height}"
         )
+        live_stats = _LiveStats(rtt_ms=rtt_floor * 1000)
         state = TelnetInputState()
         input_task = asyncio.create_task(
             read_telnet_input(reader, writer, state, app_session.input)
         )
         stats_task = asyncio.create_task(
-            _log_connection_stats(writer, peer_host, peer_port)
+            _log_connection_stats(writer, peer_host, peer_port, live_stats=live_stats)
         )
         try:
             return await loop.run_in_executor(
@@ -472,6 +499,7 @@ async def _telnet_shell(
                 state,
                 rtt_floor,
                 bandwidth_bps,
+                live_stats,
             )
         finally:
             input_task.cancel()
