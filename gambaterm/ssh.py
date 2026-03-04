@@ -192,6 +192,7 @@ def thread_target(
                 break_after=app_config.break_after,
                 speed_factor=app_config.speed_factor,
                 use_cpr_sync=app_config.cpr_sync,
+                sextant=app_config.sextant,
             )
         except (KeyboardInterrupt, OSError):
             return 0

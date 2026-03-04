@@ -61,23 +61,34 @@ async def vt100_input_from_process(
             await asyncio.sleep(0)  # Let the loop remove the file descriptor
 
 
+RESIZE_DEBOUNCE_SECONDS = 0.1
+
+
 @contextmanager
 def bind_resize_process_to_app_session(
     process: SSHServerProcess[str], app_session: AppSession
 ) -> Iterator[None]:
     original_method = process.terminal_size_changed
+    pending: list[asyncio.TimerHandle] = []
 
     def terminal_size_changed(
         width: int, height: int, pixwidth: int, pixheight: int
     ) -> None:
+        original_method(width, height, pixheight, pixwidth)
+        if pending:
+            pending.pop().cancel()
         if app_session.app is not None:
-            app_session.app._on_resize()
-        return original_method(width, height, pixheight, pixwidth)
+            loop = asyncio.get_event_loop()
+            pending.append(
+                loop.call_later(RESIZE_DEBOUNCE_SECONDS, app_session.app._on_resize)
+            )
 
     try:
         process.terminal_size_changed = terminal_size_changed  # type: ignore[method-assign]
         yield
     finally:
+        if pending:
+            pending.pop().cancel()
         del process.terminal_size_changed
 
 

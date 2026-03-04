@@ -81,6 +81,13 @@ def add_optional_arguments(parser: argparse.ArgumentParser) -> None:
         type=str,
         help="Enable game controller support",
     )
+    parser.add_argument(
+        "--sextant",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use sextant block rendering (auto-detected by default, "
+        "use --no-sextant to disable)",
+    )
 
 
 def main(
@@ -153,6 +160,7 @@ Try to force a color mode using the `--color-mode` option with a value between 1
                             break_after=args.break_after,
                             speed_factor=args.speed_factor,
                             use_cpr_sync=args.cpr_sync,
+                            sextant=args.sextant,
                         )
 
             # Deal with ctrl+c and ctrl+d exceptions

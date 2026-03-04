@@ -12,6 +12,7 @@ import numpy as np
 from prompt_toolkit.application import AppSession
 
 from .termblit import blit
+from .sextant import blit_sextant
 from .audio import AudioOut
 from .console import Console, InputGetter
 from .colors import ColorMode
@@ -26,9 +27,17 @@ def timing(deltas: Deque[float]) -> Iterator[None]:
         deltas.append(time.perf_counter() - start)
 
 
-def get_ref(width: int, height: int, console: Console) -> tuple[int, int]:
-    refx = 2 + max(0, (height - console.HEIGHT // 2) // 2)
-    refy = 3 + max(0, (width - console.WIDTH) // 2)
+def get_ref(
+    width: int, height: int, console: Console, sextant: bool = False,
+) -> tuple[int, int]:
+    if sextant:
+        rows = console.HEIGHT // 3
+        cols = console.WIDTH // 2
+    else:
+        rows = console.HEIGHT // 2
+        cols = console.WIDTH
+    refx = 2 + max(0, (height - rows) // 2)
+    refy = 3 + max(0, (width - cols) // 2)
     return refx, refy
 
 
@@ -43,6 +52,21 @@ def write_bytes(app_session: AppSession, video_data: bytes) -> None:
         os.write(app_session.output.fileno(), video_data)
 
 
+_COLOR_CYCLE = [
+    ColorMode.HAS_4_BIT_COLOR,
+    ColorMode.HAS_8_BIT_COLOR,
+    ColorMode.HAS_24_BIT_COLOR,
+]
+
+
+def _next_color_mode(mode: ColorMode) -> ColorMode:
+    try:
+        idx = _COLOR_CYCLE.index(mode)
+    except ValueError:
+        idx = -1
+    return _COLOR_CYCLE[(idx + 1) % len(_COLOR_CYCLE)]
+
+
 def run(
     console: Console,
     get_input: InputGetter,
@@ -53,6 +77,8 @@ def run(
     break_after: int | None = None,
     speed_factor: float = 1.0,
     use_cpr_sync: bool = False,
+    sextant: bool | None = None,
+    cycle_color_on_ctrl_c: bool = False,
 ) -> None:
     assert color_mode > 0
 
@@ -61,9 +87,14 @@ def run(
     audio = np.full((2 * console.TICKS_IN_FRAME, 2), -0x7FFF, np.int16)
     last_frame = video.copy()
 
-    # Print area
+    # Determine sextant mode
     height, width = app_session.output.get_size()
-    refx, refy = get_ref(width, height, console)
+    if sextant is None:
+        use_sextant = width < console.WIDTH + 6
+    else:
+        use_sextant = sextant
+    blit_fn = blit_sextant if use_sextant else blit
+    refx, refy = get_ref(width, height, console, use_sextant)
 
     # Prepare reporting
     fps = console.FPS * speed_factor
@@ -114,7 +145,11 @@ def run(
         # Read keys
         for event in app_session.input.read_keys():
             if event.key == "c-c":
-                raise KeyboardInterrupt
+                if cycle_color_on_ctrl_c:
+                    color_mode = _next_color_mode(color_mode)
+                    last_frame.fill(0xFFFFFFFF)
+                else:
+                    raise KeyboardInterrupt
             if event.key == "c-d":
                 raise OSError
             if event.key == "<cursor-position-response>":
@@ -132,10 +167,13 @@ def run(
                     app_session.output.erase_screen()
                     app_session.output.flush()
                     height, width = new_size
-                    refx, refy = get_ref(width, height, console)
+                    if sextant is None:
+                        use_sextant = width < console.WIDTH + 6
+                        blit_fn = blit_sextant if use_sextant else blit
+                    refx, refy = get_ref(width, height, console, use_sextant)
                     last_frame.fill(0xFFFFFFFF)
                 # Render frame
-                video_data = blit(
+                video_data = blit_fn(
                     video, last_frame, refx, refy, width - 1, height, color_mode
                 )
                 last_frame = video.copy()
@@ -152,7 +190,7 @@ def run(
             # Video sync
             if video_data:
                 # Write video frame, might block
-                write_bytes(app_session, video_data)
+                write_bytes(app_session, b"\033[?2026h" + video_data + b"\033[?2026l")
                 # Send CPR request
                 if use_cpr_sync:
                     app_session.output.ask_for_cpr()

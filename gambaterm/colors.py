@@ -65,6 +65,9 @@ def detect_color_mode(env: dict[str, str]) -> ColorMode:
     # 256 colors, says $TERM or $COLORTERM
     if "256" in term or "256" in colorterm:
         return ColorMode.HAS_8_BIT_COLOR
+    # xterm prefix implies 256-color by modern convention
+    if term.startswith("xterm"):
+        return ColorMode.HAS_8_BIT_COLOR
     # Basic terminal, says $TERM
     if any(x in term for x in BASIC_TERMINALS):
         return ColorMode.HAS_4_BIT_COLOR

@@ -39,6 +39,7 @@ dependencies = [
 
 [project.optional-dependencies]
 controller-support = ["pygame>=1.9.5,<2.0.0"]
+telnet = ["telnetlib3", "blessed"]
 
 [project.urls]
 Homepage = "https://github.com/vxgmichel/gambatte-terminal"
@@ -46,6 +47,7 @@ Homepage = "https://github.com/vxgmichel/gambatte-terminal"
 [project.scripts]
 gambaterm = "gambaterm:main"
 gambaterm-ssh = "gambaterm.ssh:main"
+gambaterm-telnet = "gambaterm.telnet:main"
 
 [tool.setuptools]
 packages = ["gambaterm"]
@@ -63,7 +65,11 @@ module = [
     "samplerate",
     "sounddevice",
     "pynput",
-    "Xlib.*"
+    "Xlib.*",
+    "telnetlib3",
+    "telnetlib3.*",
+    "blessed",
+    "blessed.*"
 ]
 ignore_missing_imports = true
 
