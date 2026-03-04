@@ -18,8 +18,13 @@ from .console import Console
 HOLD_DURATION = 0.15
 # Expected key repeat rate (~30 keys/sec)
 EXPECTED_REPEAT_INTERVAL = 0.035
-# Release if no repeat arrives (generous window for kitty protocol)
+# Release if no repeat arrives — short window before kitty is confirmed
 RELEASE_AFTER_NO_REPEAT = EXPECTED_REPEAT_INTERVAL * 4
+# Once kitty is confirmed we have explicit release events, so hold for a long
+# time and rely on those rather than the repeat timer.  OS keyboard repeat is
+# suppressed for earlier-pressed keys while a second key is held, so a short
+# timeout causes premature release of multi-key chords.
+KITTY_CONFIRMED_HOLD = 5.0
 
 # Blessed Keystroke name → Console.Input
 KEY_INPUT_MAP: dict[str, Console.Input] = {
@@ -147,11 +152,12 @@ def _map_keystroke(
 
     # Determine hold duration based on protocol
     if hasattr(ks, 'released'):
-        # Kitty protocol available — use generous hold with explicit release
+        # Kitty press/repeat event — we have explicit releases, use long hold
+        # so that multi-key chords don't expire while OS repeat is suppressed.
         kitty_detected = True
-        hold = RELEASE_AFTER_NO_REPEAT
+        hold = KITTY_CONFIRMED_HOLD
     elif kitty_detected:
-        hold = RELEASE_AFTER_NO_REPEAT
+        hold = KITTY_CONFIRMED_HOLD
     else:
         hold = HOLD_DURATION
 

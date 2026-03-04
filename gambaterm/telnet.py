@@ -45,6 +45,7 @@ class _LiveStats:
     frame_p95_bytes: int = 0
     sweep_tx_ms: float = 0.0   # last CPR transmission overhead (excl. RTT floor)
     nul_pad_last: int = 0
+    max_bw_mbps: float = 0.0   # per-connection bandwidth cap (0 = unlimited)
 
 
 @contextmanager
@@ -390,13 +391,19 @@ async def _log_connection_stats(
                 )
                 regime = "bw-limited" if bw_limited else "rtt-limited"
                 nul_str = f" nul-pad {live_stats.nul_pad_last}B," if live_stats.nul_pad_last > 0 else ""
+                cap_mbps = live_stats.max_bw_mbps
+                eff_mbps = min(live_stats.fast_bw_mbps, cap_mbps) if cap_mbps > 0 else live_stats.fast_bw_mbps
+                cap_str = f" (cap {cap_mbps:.1f})" if cap_mbps > 0 else ""
+                def _fmt_bytes(n: int) -> str:
+                    return f"{n // 1024}KB" if n >= 1024 else f"{n}B"
                 print(
                     f"[Sweep {peer_host}:{peer_port}] "
                     f"{live_stats.frames_per_sweep} fr/sweep,"
                     f"{nul_str} "
-                    f"bw {live_stats.fast_bw_mbps:.3f}/{live_stats.slow_bw_mbps:.3f} Mbit/s, "
-                    f"frame avg {live_stats.frame_mean_bytes // 1024}KB "
-                    f"p95 {live_stats.frame_p95_bytes // 1024}KB, "
+                    f"link {live_stats.fast_bw_mbps:.3f}/{live_stats.slow_bw_mbps:.3f} Mbit/s{cap_str}, "
+                    f"eff {eff_mbps:.3f} Mbit/s, "
+                    f"frame avg {_fmt_bytes(live_stats.frame_mean_bytes)} "
+                    f"p95 {_fmt_bytes(live_stats.frame_p95_bytes)}, "
                     f"tx {live_stats.sweep_tx_ms:.0f}ms, "
                     f"{regime}"
                 )
@@ -511,7 +518,10 @@ async def _telnet_shell(
             "[Terminal Info] "
             f"{peer_host}: {terminal_type}, {color_label}, {width}x{height}"
         )
-        live_stats = _LiveStats(rtt_ms=rtt_floor * 1000)
+        live_stats = _LiveStats(
+            rtt_ms=rtt_floor * 1000,
+            max_bw_mbps=getattr(app_config, 'max_connection_bw_mbps', 0.0),
+        )
         state = TelnetInputState()
         input_task = asyncio.create_task(
             read_telnet_input(reader, writer, state, app_session.input)
