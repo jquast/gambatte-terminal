@@ -68,6 +68,9 @@ def detect_color_mode(env: dict[str, str]) -> ColorMode:
     # xterm prefix implies 256-color by modern convention
     if term.startswith("xterm"):
         return ColorMode.HAS_8_BIT_COLOR
+    # Known true-color terminals that don't always advertise via COLORTERM
+    if "ghostty" in term or "kitty" in term:
+        return ColorMode.HAS_24_BIT_COLOR
     # Basic terminal, says $TERM
     if any(x in term for x in BASIC_TERMINALS):
         return ColorMode.HAS_4_BIT_COLOR

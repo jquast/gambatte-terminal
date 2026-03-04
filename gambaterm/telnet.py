@@ -448,6 +448,19 @@ async def _telnet_shell(
     peername = writer.get_extra_info("peername")  # type: ignore[union-attr]
     peer_host = peername[0] if peername else "unknown"
     peer_port = peername[1] if peername else 0
+
+    # Wait for TTYPE and NEW_ENVIRON negotiation to settle before reading the
+    # environment.  Clients like Ghostty send TERM via TTYPE and COLORTERM via
+    # NEW_ENVIRON; the latter can arrive after the shell is invoked, causing a
+    # spurious NO_COLOR rejection if we read too early.
+    try:
+        await asyncio.wait_for(
+            writer.wait_for(pending={"TTYPE": False, "NEW_ENVIRON": False}),  # type: ignore[union-attr]
+            timeout=1.0,
+        )
+    except (asyncio.TimeoutError, KeyError):
+        pass
+
     terminal_type = (
         writer.get_extra_info("TERM")  # type: ignore[union-attr]
         or "unknown"
