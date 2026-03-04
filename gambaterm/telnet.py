@@ -126,6 +126,7 @@ def thread_target(
                 cycle_color_on_ctrl_c=True,
                 cpr_rtt_floor=rtt_floor,
                 cpr_bandwidth_bps=bandwidth_bps,
+                max_bw_bps=getattr(app_config, 'max_connection_bw_mbps', 0.0) * 1_000_000,
                 live_stats=live_stats,
             )
         except (KeyboardInterrupt, OSError):
@@ -643,6 +644,13 @@ def main(
         action="store_true",
         default=False,
         help="Skip RTT/bandwidth calibration on connect (disables adaptive sweep, legacy 1-frame-per-CPR behaviour)",
+    )
+    parser.add_argument(
+        "--max-connection-bw-mbps",
+        type=float,
+        default=5.0,
+        metavar="MBPS",
+        help="Cap per-connection bandwidth used for NUL pacing in Mbit/s (default 5.0, 0 = unlimited)",
     )
 
     # Parse arguments

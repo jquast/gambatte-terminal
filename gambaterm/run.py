@@ -84,6 +84,7 @@ def run(
     cycle_color_on_ctrl_c: bool = False,
     cpr_rtt_floor: float = 0.0,
     cpr_bandwidth_bps: float = 0.0,
+    max_bw_bps: float = 0.0,
     live_stats: Any = None,
 ) -> None:
     assert color_mode > 0
@@ -284,7 +285,8 @@ def run(
                 # NUL inter-frame pacing: pad frame to fill one bandwidth-slot so consecutive
                 # frames arrive at the terminal spaced by 1/target_fps seconds.
                 if use_cpr_sync and fast_bw_ema > 0 and frame_size_history:
-                    bw_bytes_per_sec = fast_bw_ema / 8
+                    capped_bw = min(fast_bw_ema, max_bw_bps) if max_bw_bps > 0 else fast_bw_ema
+                    bw_bytes_per_sec = capped_bw / 8
                     mean_bytes = statistics.mean(frame_size_history)
                     bw_fps_cap = bw_bytes_per_sec / mean_bytes
                     target_fps_for_pacing = min(fps / frame_advance, bw_fps_cap)
