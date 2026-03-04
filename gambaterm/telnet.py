@@ -38,6 +38,13 @@ class _LiveStats:
 
     fps: float = 0.0
     rtt_ms: float = 0.0
+    frames_per_sweep: int = 0
+    fast_bw_mbps: float = 0.0
+    slow_bw_mbps: float = 0.0
+    frame_mean_bytes: int = 0
+    frame_p95_bytes: int = 0
+    sweep_tx_ms: float = 0.0   # last CPR transmission overhead (excl. RTT floor)
+    nul_pad_last: int = 0
 
 
 @contextmanager
@@ -363,7 +370,7 @@ async def _log_connection_stats(
             uptime = f"{hours}h{minutes:02d}m{secs:02d}s" if hours else f"{minutes}m{secs:02d}s"
 
             idle_str = f" (idle {_fmt_idle(idle_duration)})" if idle_duration >= 1.0 else ""
-            fps_str = f", {live_stats.fps:.0f} FPS" if live_stats and live_stats.fps > 0 else ""
+            fps_str = f", {live_stats.fps:.1f} FPS" if live_stats and live_stats.fps > 0 else ""
             rtt_str = (
                 f", RTT {live_stats.rtt_ms:.1f}ms" if live_stats and live_stats.rtt_ms > 0 else ""
             )
@@ -374,6 +381,24 @@ async def _log_connection_stats(
                 f"tx {tx:,}B ({tx_mbps:.3f}/{avg_tx_mbps:.3f} Mbit/s)"
                 f"{fps_str}{rtt_str}{idle_str}"
             )
+
+            if live_stats and live_stats.frames_per_sweep > 0:
+                bw_limited = (
+                    live_stats.sweep_tx_ms > live_stats.rtt_ms * 0.5
+                    if live_stats.rtt_ms > 0 else False
+                )
+                regime = "bw-limited" if bw_limited else "rtt-limited"
+                nul_str = f" nul-pad {live_stats.nul_pad_last}B," if live_stats.nul_pad_last > 0 else ""
+                print(
+                    f"[Sweep {peer_host}:{peer_port}] "
+                    f"{live_stats.frames_per_sweep} fr/sweep,"
+                    f"{nul_str} "
+                    f"bw {live_stats.fast_bw_mbps:.3f}/{live_stats.slow_bw_mbps:.3f} Mbit/s, "
+                    f"frame avg {live_stats.frame_mean_bytes // 1024}KB "
+                    f"p95 {live_stats.frame_p95_bytes // 1024}KB, "
+                    f"tx {live_stats.sweep_tx_ms:.0f}ms, "
+                    f"{regime}"
+                )
 
             if idle_duration >= idle_timeout:
                 print(
@@ -470,6 +495,11 @@ async def _telnet_shell(
         if getattr(app_config, 'no_calibrate', False):
             rtt_floor, bandwidth_bps = 0.0, 0.0
         else:
+            import random
+            from telnetlib3.accessories import PATIENCE_MESSAGES
+            patience = random.choice(PATIENCE_MESSAGES)
+            writer.write(f"{patience}...\r\n".encode("utf-8"))  # type: ignore[union-attr]
+            await writer.drain()  # type: ignore[union-attr]
             rtt_floor, bandwidth_bps = await _calibrate_connection(
                 reader, writer, host=peer_host
             )
@@ -521,20 +551,37 @@ async def run_server(
 
     shell = make_telnet_shell(app_config, executor)
 
-    if getattr(app_config, "robot_check", False):
+    robot_check = getattr(app_config, "robot_check", False)
+    max_players = getattr(app_config, "max_players", 0)
+
+    if robot_check or max_players > 0:
+        from telnetlib3.guard_shells import ConnectionCounter, busy_shell
         from telnetlib3.guard_shells import robot_check as do_robot_check
         from telnetlib3.guard_shells import robot_shell
 
+        counter = ConnectionCounter(max_players) if max_players > 0 else None
         inner_shell = shell
 
         async def guarded_shell(reader: object, writer: object) -> None:
-            passed = await do_robot_check(reader, writer)  # type: ignore[arg-type]
-            if not passed:
-                await robot_shell(reader, writer)  # type: ignore[arg-type]
-                if not writer.is_closing():  # type: ignore[union-attr]
-                    writer.close()  # type: ignore[union-attr]
+            if counter is not None and not counter.try_acquire():
+                try:
+                    await busy_shell(reader, writer)  # type: ignore[arg-type]
+                finally:
+                    if not writer.is_closing():  # type: ignore[union-attr]
+                        writer.close()  # type: ignore[union-attr]
                 return
-            await inner_shell(reader, writer)
+            try:
+                if robot_check:
+                    passed = await do_robot_check(reader, writer)  # type: ignore[arg-type]
+                    if not passed:
+                        await robot_shell(reader, writer)  # type: ignore[arg-type]
+                        if not writer.is_closing():  # type: ignore[union-attr]
+                            writer.close()  # type: ignore[union-attr]
+                        return
+                await inner_shell(reader, writer)
+            finally:
+                if counter is not None:
+                    counter.release()
 
         shell = guarded_shell
 
@@ -570,6 +617,13 @@ def main(
         default="127.0.0.1",
         help="Bind address of the telnet server, "
         "use `0.0.0.0` for all interfaces (default is localhost)",
+    )
+    parser.add_argument(
+        "--max-players",
+        type=int,
+        default=0,
+        metavar="N",
+        help="maximum concurrent players (0 = unlimited)",
     )
     parser.add_argument(
         "--robot-check",
