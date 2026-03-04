@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import statistics
 import contextlib
 from itertools import count
 from collections import deque
@@ -81,6 +82,8 @@ def run(
     use_cpr_sync: bool = False,
     sextant: bool | None = None,
     cycle_color_on_ctrl_c: bool = False,
+    cpr_rtt_floor: float = 0.0,
+    cpr_bandwidth_bps: float = 0.0,
 ) -> None:
     assert color_mode > 0
 
@@ -124,6 +127,28 @@ def run(
     last_resize_time: float | None = None
     _RESIZE_DEBOUNCE = 0.05
 
+    # Sweep-based CPR flow control state.
+    # Instead of one CPR per frame, we pipeline `frames_per_sweep` frames before
+    # asking for a CPR echo.  This fills roughly half an RTT worth of bandwidth.
+    _FAST_EMA_ALPHA = 0.25   # reacts quickly to bandwidth drops
+    _SLOW_EMA_ALPHA = 0.05   # tracks sustained throughput
+    _SAFETY_FACTOR = 0.85    # conservative headroom to avoid overfilling buffers
+    _SWEEP_WINDOW = 0.5      # fraction of RTT to fill per sweep (half-RTT)
+    _MIN_OVERHEAD_S = 0.010  # ignore CPR cycles shorter than 10 ms (measurement noise)
+    _FRAME_SIZE_P95_SIGMAS = 2   # mean + N*sigma ≈ p95 of frame size distribution
+    _FRAME_HISTORY_LEN = 300     # ~30 s at ~10 fps; long window for stable VBR estimate
+    _CONSERVATIVE_FRAME_BYTES = 15_000  # initial frame-size estimate before history fills
+    fast_bw_ema = cpr_bandwidth_bps
+    slow_bw_ema = cpr_bandwidth_bps
+    frames_per_sweep = 1
+    frames_since_cpr = 0
+    cpr_sent_at: float | None = None
+    cpr_bytes_in_sweep = 0
+    frame_size_history: Deque[int] = deque(maxlen=_FRAME_HISTORY_LEN)
+    if cpr_bandwidth_bps > 0 and cpr_rtt_floor > 0:
+        sweep_budget = cpr_bandwidth_bps * cpr_rtt_floor * _SWEEP_WINDOW / 8
+        frames_per_sweep = max(1, int(sweep_budget / _CONSERVATIVE_FRAME_BYTES))
+
     # Loop over emulator frames
     for i in count():
         # Add total deltas
@@ -159,6 +184,29 @@ def run(
                 raise OSError
             if event.key == "<cursor-position-response>":
                 screen_ready = True
+                if (cpr_sent_at is not None and cpr_bytes_in_sweep > 0
+                        and cpr_rtt_floor > 0 and cpr_bandwidth_bps > 0):
+                    elapsed = time.perf_counter() - cpr_sent_at
+                    # Subtract RTT floor to isolate transmission time
+                    overhead = elapsed - cpr_rtt_floor
+                    if overhead > _MIN_OVERHEAD_S:
+                        meas = cpr_bytes_in_sweep * 8 / overhead
+                        # Dual-EWMA: fast reacts to drops, slow tracks sustained BW
+                        fast_bw_ema = (1 - _FAST_EMA_ALPHA) * fast_bw_ema + _FAST_EMA_ALPHA * meas
+                        slow_bw_ema = (1 - _SLOW_EMA_ALPHA) * slow_bw_ema + _SLOW_EMA_ALPHA * meas
+                        # Use the lower of the two EMAs for a conservative estimate
+                        safe_bw = min(fast_bw_ema, slow_bw_ema) * _SAFETY_FACTOR
+                        sweep_budget = safe_bw * cpr_rtt_floor * _SWEEP_WINDOW / 8
+                        if frame_size_history:
+                            mean_dl = statistics.mean(frame_size_history)
+                            stdev_dl = (statistics.stdev(frame_size_history)
+                                        if len(frame_size_history) > 1 else mean_dl)
+                            # p95 approximation: absorbs VBR burst frames
+                            p95 = mean_dl + _FRAME_SIZE_P95_SIGMAS * stdev_dl
+                            frames_per_sweep = max(1, int(sweep_budget / p95))
+                frames_since_cpr = 0
+                cpr_bytes_in_sweep = 0
+                cpr_sent_at = None
 
         # Check terminal size (debounced)
         current_size = app_session.output.get_size()
@@ -203,6 +251,9 @@ def run(
                 data_length.append(0)
                 shown_frames.append(False)
 
+        if video_data:
+            frame_size_history.append(len(video_data))
+
         with timing(sync_deltas):
             # Video sync
             if video_data:
@@ -210,8 +261,12 @@ def run(
                 write_bytes(app_session, b"\033[?2026h" + video_data + b"\033[?2026l")
                 # Send CPR request
                 if use_cpr_sync:
-                    app_session.output.ask_for_cpr()
-                    screen_ready = False
+                    frames_since_cpr += 1
+                    cpr_bytes_in_sweep += len(video_data)
+                    if frames_since_cpr >= frames_per_sweep:
+                        app_session.output.ask_for_cpr()
+                        screen_ready = False
+                        cpr_sent_at = time.perf_counter()
             # Timing sync
             increment = samples / console.TICKS_IN_FRAME
             deadline = start + increment / fps

@@ -57,6 +57,8 @@ def thread_target(
     username: str | None,
     color_mode: ColorMode,
     input_state: TelnetInputState | None = None,
+    rtt_floor: float = 0.0,
+    bandwidth_bps: float = 0.0,
 ) -> int:
     # Create save directory for user
     if app_config.input_file is None:
@@ -96,6 +98,8 @@ def thread_target(
                 use_cpr_sync=True,
                 sextant=app_config.sextant,
                 cycle_color_on_ctrl_c=True,
+                cpr_rtt_floor=rtt_floor,
+                cpr_bandwidth_bps=bandwidth_bps,
             )
         except (KeyboardInterrupt, OSError):
             return 0
@@ -180,6 +184,110 @@ async def _detect_true_color_telnet(
 
     text = buf.decode("latin-1", errors="replace")
     return "P1$r" in text and "48:2" in text and "1:2:3m" in text
+
+
+async def _calibrate_connection(
+    reader: object,
+    writer: object,
+    host: str = "unknown",
+    rtt_probes: int = 5,
+    bulk_sizes: tuple = (1_000, 10_000, 100_000, 500_000),
+    timeout: float = 5.0,
+) -> tuple[float, float]:
+    """Measure RTT floor and downlink bandwidth via NUL bulk probes.
+
+    Must be called before the input reading task starts (exclusive reader access).
+
+    :param reader: telnetlib3 reader
+    :param writer: telnetlib3 writer
+    :param host: peer host for logging
+    :param rtt_probes: number of CPR round-trips for RTT floor estimation
+    :param bulk_sizes: byte counts to probe for bandwidth measurement
+    :param timeout: total time budget in seconds
+    :returns: (rtt_floor_s, bandwidth_bps)
+    """
+    # Minimum transmission time to trust a bandwidth sample; filters out
+    # tiny probes that complete within measurement noise.
+    _MIN_BW_OVERHEAD_S = 0.020
+
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+
+    async def read_until_r() -> bool:
+        """Read from reader until a CPR response terminator 'R' is seen.
+
+        CPR (cursor position report) responses end with 'R' (ESC[row;colR).
+        """
+        try:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return False
+                chunk = await asyncio.wait_for(
+                    reader.read(256),  # type: ignore[union-attr]
+                    timeout=min(2.0, remaining),
+                )
+                if not chunk:
+                    return False
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("latin-1")
+                if b"R" in chunk:
+                    return True
+        except asyncio.TimeoutError:
+            return False
+
+    # Phase 1: RTT floor — send ESC[6n (cursor position query) and time the echo.
+    # Min of N samples removes OS scheduling jitter from the estimate.
+    rtt_samples = []
+    for _ in range(rtt_probes):
+        if loop.time() >= deadline:
+            break
+        writer.write(b"\x1b[6n")  # type: ignore[union-attr]
+        await writer.drain()  # type: ignore[union-attr]
+        t0 = loop.time()
+        if await read_until_r():
+            rtt_samples.append(loop.time() - t0)
+
+    if not rtt_samples:
+        return 0.0, 0.0
+
+    rtt_floor = min(rtt_samples)
+
+    # Phase 2: bandwidth — prepend NUL bytes before the CPR query so the terminal
+    # cannot reply until it has consumed the full probe payload.  The time beyond
+    # rtt_floor is the transmission delay, giving us bytes-per-second.
+    bw_samples = []
+    for size in bulk_sizes:
+        if loop.time() >= deadline:
+            break
+        writer.write(bytes(size) + b"\x1b[6n")  # type: ignore[union-attr]
+        await writer.drain()  # type: ignore[union-attr]
+        t0 = loop.time()
+        if await read_until_r():
+            overhead = (loop.time() - t0) - rtt_floor
+            if overhead > _MIN_BW_OVERHEAD_S:
+                bw_samples.append(size * 8 / overhead)
+
+    if not bw_samples:
+        bandwidth_bps = 0.0
+    else:
+        bw_samples.sort()
+        bandwidth_bps = bw_samples[len(bw_samples) // 2]  # median
+
+    if bandwidth_bps > 0 and rtt_floor > 0:
+        # Half-RTT window in bytes / conservative initial frame size estimate
+        sweep_budget = bandwidth_bps * rtt_floor / 2 / 8
+        conservative_frame_bytes = 15_000  # ~15 KB; refined at runtime from history
+        frames_per_sweep = max(1, int(sweep_budget / conservative_frame_bytes))
+    else:
+        frames_per_sweep = 1
+
+    print(
+        f"[Calibrate {host}] RTT floor: {rtt_floor * 1000:.1f}ms, "
+        f"bandwidth: {bandwidth_bps / 1_000_000:.2f} Mbit/s, "
+        f"frames_per_sweep: {frames_per_sweep}"
+    )
+    return rtt_floor, bandwidth_bps
 
 
 def _fmt_idle(seconds: float) -> str:
@@ -333,6 +441,14 @@ async def _telnet_shell(
             if await _detect_true_color_telnet(reader, writer):
                 color_mode = ColorMode.HAS_24_BIT_COLOR
 
+        # Measure RTT floor and bandwidth for adaptive sweep-based flow control
+        if getattr(app_config, 'no_calibrate', False):
+            rtt_floor, bandwidth_bps = 0.0, 0.0
+        else:
+            rtt_floor, bandwidth_bps = await _calibrate_connection(
+                reader, writer, host=peer_host
+            )
+
         height, width = app_session.output.get_size()
         print(
             "[Terminal Info] "
@@ -354,6 +470,8 @@ async def _telnet_shell(
                 username,
                 color_mode,
                 state,
+                rtt_floor,
+                bandwidth_bps,
             )
         finally:
             input_task.cancel()
@@ -374,6 +492,24 @@ async def run_server(
     import telnetlib3  # noqa: E402
 
     shell = make_telnet_shell(app_config, executor)
+
+    if getattr(app_config, "robot_check", False):
+        from telnetlib3.guard_shells import robot_check as do_robot_check
+        from telnetlib3.guard_shells import robot_shell
+
+        inner_shell = shell
+
+        async def guarded_shell(reader: object, writer: object) -> None:
+            passed = await do_robot_check(reader, writer)  # type: ignore[arg-type]
+            if not passed:
+                await robot_shell(reader, writer)  # type: ignore[arg-type]
+                if not writer.is_closing():  # type: ignore[union-attr]
+                    writer.close()  # type: ignore[union-attr]
+                return
+            await inner_shell(reader, writer)
+
+        shell = guarded_shell
+
     server = await telnetlib3.create_server(
         host=app_config.bind,
         port=app_config.port,
@@ -408,11 +544,23 @@ def main(
         "use `0.0.0.0` for all interfaces (default is localhost)",
     )
     parser.add_argument(
+        "--robot-check",
+        action="store_true",
+        default=False,
+        help="reject bots by checking if client responds to cursor position requests",
+    )
+    parser.add_argument(
         "--port",
         "-p",
         type=int,
         default=8023,
         help="Port of the telnet server (default is 8023)",
+    )
+    parser.add_argument(
+        "--no-calibrate",
+        action="store_true",
+        default=False,
+        help="Skip RTT/bandwidth calibration on connect (disables adaptive sweep, legacy 1-frame-per-CPR behaviour)",
     )
 
     # Parse arguments
