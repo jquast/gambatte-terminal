@@ -35,9 +35,6 @@ KEY_INPUT_MAP: dict[str, Console.Input] = {
 
 # Character value → Console.Input
 CHAR_INPUT_MAP: dict[str, Console.Input] = {
-    "w": Console.Input.UP,
-    "a": Console.Input.LEFT,
-    "s": Console.Input.DOWN,
     "f": Console.Input.A,
     "v": Console.Input.A,
     " ": Console.Input.A,
@@ -59,12 +56,6 @@ CHAR_EVENT_MAP: dict[str, Console.Event] = {
     "9": Console.Event.SELECT_STATE_9,
     "l": Console.Event.LOAD_STATE,
     "k": Console.Event.SAVE_STATE,
-}
-
-# Mouse button name → Console.Input
-MOUSE_BUTTON_MAP: dict[str, Console.Input] = {
-    "MOUSE_LEFT": Console.Input.A,
-    "MOUSE_RIGHT": Console.Input.B,
 }
 
 
@@ -159,18 +150,6 @@ def _map_keystroke(
     else:
         hold = HOLD_DURATION
 
-    # Mouse events
-    if name and name.startswith("MOUSE_"):
-        mouse_button = MOUSE_BUTTON_MAP.get(name)
-        if mouse_button is not None:
-            # Check for mouse release via the keystroke
-            mouse_val = str(ks)
-            if "m" in mouse_val[mouse_val.rfind("<") :] if "<" in mouse_val else "":
-                state.release(mouse_button)
-            else:
-                state.press(mouse_button, hold)
-        return kitty_detected
-
     # Named key (arrows, enter, tab, etc.)
     if name:
         button = KEY_INPUT_MAP.get(name)
@@ -199,8 +178,6 @@ def _get_button(ks: Any) -> Console.Input | None:
     """Get the Console.Input button for a keystroke, if any."""
     name = ks.name
     if name:
-        if name.startswith("MOUSE_"):
-            return MOUSE_BUTTON_MAP.get(name)
         return KEY_INPUT_MAP.get(name)
     char = str(ks)
     if len(char) == 1:
@@ -224,12 +201,6 @@ async def read_telnet_input(
     """
     mapper, codes, prefixes = _build_blessed_maps()
     dec_mode_cache: dict[int, int] = {}
-
-    # Enable SGR mouse reporting
-    writer.write(b"\x1b[?1000h")  # type: ignore[union-attr]
-    writer.write(b"\x1b[?1006h")  # type: ignore[union-attr]
-    dec_mode_cache[1000] = 1
-    dec_mode_cache[1006] = 1
 
     # Try to enable kitty keyboard protocol (disambiguate + report_events)
     writer.write(b"\x1b[=3u")  # type: ignore[union-attr]
@@ -271,10 +242,8 @@ async def read_telnet_input(
     except (asyncio.CancelledError, ConnectionError, EOFError):
         pass
     finally:
-        # Cleanup: disable mouse and kitty protocol
+        # Cleanup: disable kitty protocol
         try:
-            writer.write(b"\x1b[?1000l")  # type: ignore[union-attr]
-            writer.write(b"\x1b[?1006l")  # type: ignore[union-attr]
             writer.write(b"\x1b[=0u")  # type: ignore[union-attr]
         except (ConnectionError, OSError):
             pass

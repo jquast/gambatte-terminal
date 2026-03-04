@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import re
+import os
+import sys
 import time
 import argparse
+import contextlib
 
 from prompt_toolkit.application import create_app_session
-
+from prompt_toolkit.input import create_pipe_input
 
 from .run import run
 from .console import GameboyColor, Console
@@ -14,6 +18,46 @@ from .colors import detect_local_color_mode, ColorMode
 from .keyboard_input import console_input_from_keyboard_context
 from .controller_input import combine_console_input_from_controller_context
 from .file_input import console_input_from_file_context, write_input_context
+from .local_input import local_blessed_input_context
+
+_KITTY_RESP_RE = re.compile(rb"\x1b\[\?\d+u")
+
+
+def _probe_kitty_keyboard(timeout: float = 0.2) -> bool:
+    """Probe the local terminal for kitty keyboard protocol support.
+
+    Temporarily sets stdin to raw mode, sends a kitty keyboard capability
+    query (``ESC [ ? u``), and checks for the expected response.
+
+    :param timeout: Seconds to wait for a terminal response.
+    :returns: ``True`` if the terminal responds to a kitty keyboard query.
+    """
+    if sys.platform == "win32":
+        return False
+    import tty
+    import termios
+    import select as _select
+    try:
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+    except (termios.error, ValueError):
+        return False
+    try:
+        tty.setraw(fd)
+        sys.stdout.buffer.write(b"\x1b[?u")
+        sys.stdout.buffer.flush()
+        ready, _, _ = _select.select([fd], [], [], timeout)
+        if not ready:
+            return False
+        data = os.read(fd, 64)
+        return bool(_KITTY_RESP_RE.search(data))
+    except OSError:
+        return False
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        except termios.error:
+            pass
 
 
 def add_base_arguments(parser: argparse.ArgumentParser) -> None:
@@ -88,6 +132,13 @@ def add_optional_arguments(parser: argparse.ArgumentParser) -> None:
         help="Use sextant block rendering (auto-detected by default, "
         "use --no-sextant to disable)",
     )
+    parser.add_argument(
+        "--kitty",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use kitty keyboard protocol for input (auto-detected by default, "
+        "use --no-kitty to disable)",
+    )
 
 
 def main(
@@ -106,47 +157,69 @@ def main(
     args: argparse.Namespace = parser.parse_args(parser_args)
     console = console_cls(args)
 
-    if args.input_file is not None:
-        input_context = console_input_from_file_context(
-            console, args.input_file, args.skip_inputs
-        )
+    # Determine whether to use the blessed+kitty local input path
+    if args.input_file is not None or sys.platform == "win32":
+        use_kitty = False
+    elif args.kitty is True:
+        use_kitty = True
+    elif args.kitty is False:
+        use_kitty = False
     else:
-        input_context = console_input_from_keyboard_context(console)
-        if args.enable_controller:
-            input_context = combine_console_input_from_controller_context(
-                console, input_context
-            )
-
-    if args.write_input:
-        input_context = write_input_context(console, input_context, args.write_input)
+        use_kitty = _probe_kitty_keyboard()
 
     if args.color_mode not in [None, 1, 2, 3, 4]:
         exit(
             f"Invalid color mode `{args.color_mode}`: the value must be between 1 and 4"
         )
 
-    # Enter terminal raw mode
-    with create_app_session() as app_session:
+    with contextlib.ExitStack() as stack:
+        if use_kitty:
+            pipe_input = stack.enter_context(create_pipe_input())
+            app_session = stack.enter_context(create_app_session(input=pipe_input))
+        else:
+            app_session = stack.enter_context(create_app_session())
+
+        # Build input context
+        if args.input_file is not None:
+            input_context = console_input_from_file_context(
+                console, args.input_file, args.skip_inputs
+            )
+        elif use_kitty:
+            input_context = local_blessed_input_context(console, pipe_input)
+        else:
+            input_context = console_input_from_keyboard_context(console)
+
+        if args.input_file is None and args.enable_controller:
+            input_context = combine_console_input_from_controller_context(
+                console, input_context
+            )
+
+        if args.write_input:
+            input_context = write_input_context(console, input_context, args.write_input)
+
+        # Enter terminal raw mode
         with app_session.input.raw_mode():
             try:
-                # Detect color mode
-                if args.color_mode is None:
-                    args.color_mode = detect_local_color_mode(app_session)
-                    if args.color_mode == ColorMode.NO_COLOR:
-                        raise exit(
-                            """\
+                # Enter input context before color detection so the blessed thread
+                # is running when detect_true_color_support sends its DECRQSS probe
+                # (the terminal's response must be forwarded through pipe_input).
+                with input_context as get_gb_input:
+                    # Detect color mode
+                    if args.color_mode is None:
+                        args.color_mode = detect_local_color_mode(app_session)
+                        if args.color_mode == ColorMode.NO_COLOR:
+                            raise exit(
+                                """\
 The ANSI color support for your terminal could not be detected from your environment.
 Try to force a color mode using the `--color-mode` option with a value between 1 and 4."""
-                        )
+                            )
 
-                # Prepare alternate screen
-                app_session.output.enter_alternate_screen()
-                app_session.output.erase_screen()
-                app_session.output.hide_cursor()
-                app_session.output.flush()
+                    # Prepare alternate screen
+                    app_session.output.enter_alternate_screen()
+                    app_session.output.erase_screen()
+                    app_session.output.hide_cursor()
+                    app_session.output.flush()
 
-                # Enter input and audio contexts
-                with input_context as get_gb_input:
                     player = no_audio if args.disable_audio else audio_player
                     with player(console, args.speed_factor) as audio_out:
                         # Run the emulator

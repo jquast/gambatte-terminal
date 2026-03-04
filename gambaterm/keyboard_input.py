@@ -22,9 +22,6 @@ def get_xlib_input_mapping(console: Console) -> dict[int, Console.Input]:
         XK.XK_Down: console.Input.DOWN,
         XK.XK_Left: console.Input.LEFT,
         XK.XK_Right: console.Input.RIGHT,
-        XK.XK_w: console.Input.UP,
-        XK.XK_a: console.Input.LEFT,
-        XK.XK_s: console.Input.DOWN,
         # A button
         XK.XK_f: console.Input.A,
         XK.XK_v: console.Input.A,
@@ -69,9 +66,6 @@ def get_keyboard_input_mapping(console: Console) -> dict[str, Console.Input]:
         "down": console.Input.DOWN,
         "left": console.Input.LEFT,
         "right": console.Input.RIGHT,
-        "w": console.Input.UP,
-        "a": console.Input.LEFT,
-        "s": console.Input.DOWN,
         # A button
         "f": console.Input.A,
         "v": console.Input.A,
