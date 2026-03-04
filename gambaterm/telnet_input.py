@@ -13,6 +13,8 @@ _CPR_RE = re.compile(r"\x1b\[\d+;\d+R")
 _CPR_PREFIX_RE = re.compile(r"\x1b\[\d*[;\d]*\Z")
 # Matches Ctrl+] in legacy (\x1d) or kitty keyboard protocol (\x1b[93;5...)
 _CTRL_BRACKET_RIGHT_RE = re.compile(rb"\x1d|\x1b\[93;5[u;]")
+# Kitty Ctrl+C (\x1b[99;5u) and Ctrl+D (\x1b[100;5u) — remap to legacy bytes
+_KITTY_CTRL_CD_RE = re.compile(rb"\x1b\[(99|100);5[u;]")
 
 from .console import Console
 
@@ -199,6 +201,13 @@ def _map_keystroke(
     # legacy terminals expose the character via str(ks) when len == 1.
     char = ks.value if ks.uses_keyboard_protocol else str(ks)
     if len(char) == 1:
+        # In kitty protocol, modifier > 1 means a modifier key (Ctrl, Alt, …)
+        # is held.  Don't map e.g. Ctrl+C to the B button in that case.
+        if ks.uses_keyboard_protocol:
+            match = getattr(ks, "_match", None)
+            modifier = getattr(match, "modifier", 0) or 0
+            if modifier > 1:
+                return kitty_detected
         event = CHAR_EVENT_MAP.get(char)
         if event is not None:
             state.queue_event(event)
@@ -302,6 +311,11 @@ async def read_telnet_input(
                 return
             if pipe_input is not None:
                 pipe_input.send_bytes(raw)
+                # Kitty Ctrl+C/D arrive as \x1b[99;5u / \x1b[100;5u instead of
+                # \x03 / \x04, so the render loop never sees "c-c" / "c-d".
+                # Inject the legacy control bytes so those handlers fire.
+                for m in _KITTY_CTRL_CD_RE.finditer(raw):
+                    pipe_input.send_bytes(b"\x03" if m.group(1) == b"99" else b"\x04")
             text = decoder.decode(raw)
             if not text:
                 continue

@@ -161,6 +161,7 @@ def run(
     frame_size_fast_ema: float = _CONSERVATIVE_FRAME_BYTES
     frame_size_slow_ema: float = _CONSERVATIVE_FRAME_BYTES
     last_overhead: float = 1.0  # assume BW-limited until proven otherwise
+    force_full_redraw: bool = False
     if cpr_bandwidth_bps > 0 and cpr_rtt_floor > 0:
         sweep_budget = cpr_bandwidth_bps * cpr_rtt_floor * _SWEEP_WINDOW / 8
         frames_per_sweep = max(1, int(sweep_budget / _CONSERVATIVE_FRAME_BYTES))
@@ -196,7 +197,7 @@ def run(
             if event.key == "c-c":
                 if cycle_color_on_ctrl_c:
                     color_mode = _next_color_mode(color_mode)
-                    last_frame.fill(0xFFFFFFFF)
+                    force_full_redraw = True
                 else:
                     raise KeyboardInterrupt
             if event.key == "c-d":
@@ -280,8 +281,12 @@ def run(
                         data_length.append(0)
                         shown_frames.append(False)
                 else:
-                    # Normal render
-                    video_data = blit_fn(video, last_frame, refx, refy, width - 1, height, color_mode)
+                    # Normal render — full redraw if color mode just changed
+                    prev = None if force_full_redraw else last_frame
+                    force_full_redraw = False
+                    video_data = blit_fn(video, prev, refx, refy, width - 1, height, color_mode)
+                    if prev is None:
+                        video_data = b"\033[H\033[2J" + video_data
                     last_frame = video.copy()
                     data_length.append(len(video_data))
                     shown_frames.append(True)
