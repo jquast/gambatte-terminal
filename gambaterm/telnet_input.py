@@ -11,6 +11,8 @@ from typing import Any
 _CPR_RE = re.compile(r"\x1b\[\d+;\d+R")
 # Matches a partial CPR prefix at end of buffer (wait for more data)
 _CPR_PREFIX_RE = re.compile(r"\x1b\[\d*[;\d]*\Z")
+# Matches Ctrl+] in legacy (\x1d) or kitty keyboard protocol (\x1b[93;5...)
+_CTRL_BRACKET_RIGHT_RE = re.compile(rb"\x1d|\x1b\[93;5[u;]")
 
 from .console import Console
 
@@ -289,6 +291,15 @@ async def read_telnet_input(
             if not data:
                 break
             raw = data if isinstance(data, bytes) else data.encode("latin-1")
+            # Ctrl+] — telnet escape key: disconnect gracefully regardless of
+            # whether the client is using legacy or kitty keyboard protocol.
+            if _CTRL_BRACKET_RIGHT_RE.search(raw):
+                try:
+                    writer.write(b"\r\n\r\nCtrl+] received, disconnecting.\r\n")  # type: ignore[union-attr]
+                    writer.close()  # type: ignore[union-attr]
+                except (ConnectionError, OSError):
+                    pass
+                return
             if pipe_input is not None:
                 pipe_input.send_bytes(raw)
             text = decoder.decode(raw)

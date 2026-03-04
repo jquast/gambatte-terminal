@@ -310,6 +310,11 @@ def run(
                     bw_fps_cap = bw_bytes_per_sec / mean_bytes
                     target_fps_for_pacing = min(fps / frame_advance, bw_fps_cap)
                     slot_bytes = int(bw_bytes_per_sec / target_fps_for_pacing)
+                    # Cap slot to avoid over-padding when frames shrink (static scenes).
+                    # NUL can't pace a 113B frame that transmits in microseconds — it
+                    # just blocks writes and burns bandwidth.
+                    effective_frame = max(len(video_data), int(frame_size_fast_ema))
+                    slot_bytes = min(slot_bytes, effective_frame * 2)
                     nul_count = 0
                     if last_overhead > 0:  # only pad in BW-limited regime
                         nul_count = max(0, slot_bytes - len(video_data))
