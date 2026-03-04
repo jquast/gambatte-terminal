@@ -265,8 +265,14 @@ async def _calibrate_connection(
         except asyncio.TimeoutError:
             return False
 
-    # Phase 1: RTT floor — send ESC[6n (cursor position query) and time the echo.
-    # Min of N samples removes OS scheduling jitter from the estimate.
+    # Phase 1: RTT — send ESC[6n (cursor position query) and time the echo.
+    # GPU-accelerated terminals (kitty, wezterm, ghostty, foot, xterm …) respond
+    # to CPR only at their vsync/render boundary, giving near-zero best-case
+    # latency but 50-100 ms typical latency and occasional 1-second spikes.
+    # The minimum of a handful of samples is therefore a misleading outlier.
+    # We use the median instead: it ignores both the lucky fast sample and the
+    # rare slow spike, giving a stable estimate of what the sweep loop will
+    # actually experience frame-to-frame.
     rtt_samples = []
     for _ in range(rtt_probes):
         if loop.time() >= deadline:
@@ -280,7 +286,8 @@ async def _calibrate_connection(
     if not rtt_samples:
         return 0.0, 0.0
 
-    rtt_floor = min(rtt_samples)
+    rtt_samples.sort()
+    rtt_floor = rtt_samples[len(rtt_samples) // 2]  # median
 
     # Phase 2: bandwidth — prepend NUL bytes before the CPR query so the terminal
     # cannot reply until it has consumed the full probe payload.  The time beyond
@@ -303,7 +310,11 @@ async def _calibrate_connection(
         bw_samples.sort()
         bandwidth_bps = bw_samples[len(bw_samples) // 2]  # median
 
-    print(f"[Calibrate {host}] RTT floor: {rtt_floor * 1000:.1f}ms")
+    rtt_min = rtt_samples[0]
+    print(
+        f"[Calibrate {host}] RTT median: {rtt_floor * 1000:.1f}ms"
+        f" (min {rtt_min * 1000:.1f}ms, {len(rtt_samples)} probes)"
+    )
     return rtt_floor, bandwidth_bps
 
 
@@ -492,7 +503,7 @@ async def _telnet_shell(
             rtt_floor, bandwidth_bps = 0.0, 0.0
         else:
             rtt_floor, bandwidth_bps = await _calibrate_connection(
-                reader, writer, host=peer_host, rtt_probes=2, bulk_sizes=()
+                reader, writer, host=peer_host, rtt_probes=5, bulk_sizes=()
             )
 
         height, width = app_session.output.get_size()
