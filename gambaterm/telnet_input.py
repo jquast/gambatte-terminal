@@ -35,9 +35,14 @@ KEY_INPUT_MAP: dict[str, Console.Input] = {
 
 # Character value → Console.Input
 CHAR_INPUT_MAP: dict[str, Console.Input] = {
+    "z": Console.Input.A,
+    "a": Console.Input.A,
     "f": Console.Input.A,
     "v": Console.Input.A,
     " ": Console.Input.A,
+    "x": Console.Input.B,
+    "b": Console.Input.B,
+    "s": Console.Input.B,
     "d": Console.Input.B,
     "c": Console.Input.B,
 }
