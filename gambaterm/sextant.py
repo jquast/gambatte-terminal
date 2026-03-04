@@ -225,8 +225,25 @@ def _select_bitonal_pair(pixels: list[int]) -> tuple[int, int, int]:
 # Output-level visual delta with hysteresis
 # ---------------------------------------------------------------------------
 
+_COLOR_PAIR_HYSTERESIS: float = 0.08
+
 _display_cache: dict[tuple[int, int], tuple[int, int, int]] = {}
 _last_params: list[int] = []
+
+
+def _remap_index(pixels: list[int], bg: int, fg: int) -> int:
+    """Assign each pixel to bg or fg by nearest HSV distance, return sextant index.
+
+    :param pixels: 6 packed RGB values.
+    :param bg: Background color to assign bit=0.
+    :param fg: Foreground color to assign bit=1.
+    :returns: 6-bit sextant index.
+    """
+    idx = 0
+    for b, pixel in enumerate(pixels):
+        if _hsv_distance(pixel, fg) < _hsv_distance(pixel, bg):
+            idx |= (1 << b)
+    return idx
 
 
 def _visual_pixel_diff(
@@ -311,11 +328,21 @@ def blit_sextant(
 
             bg, fg, sextant_idx = _select_bitonal_pair(pixels)
 
-            # Skip render if the quantized visual output is completely unchanged.
+            # Color-pair hysteresis: if previous colors are close, remap to them to
+            # avoid flicker from small quantization shifts during scrolling.
             cell_key = (row, col)
             prev = _display_cache.get(cell_key)
             if prev is not None:
                 prev_bg, prev_fg, prev_idx = prev
+                direct_dist = _hsv_distance(bg, prev_bg) + _hsv_distance(fg, prev_fg)
+                swapped_dist = _hsv_distance(bg, prev_fg) + _hsv_distance(fg, prev_bg)
+                best_dist = min(direct_dist, swapped_dist)
+                if best_dist < _COLOR_PAIR_HYSTERESIS and prev_bg != prev_fg and sextant_idx != 0:
+                    if direct_dist <= swapped_dist:
+                        use_bg, use_fg = prev_bg, prev_fg
+                    else:
+                        use_bg, use_fg = prev_fg, prev_bg
+                    bg, fg, sextant_idx = use_bg, use_fg, _remap_index(pixels, use_bg, use_fg)
                 if _visual_pixel_diff(prev_bg, prev_fg, prev_idx, bg, fg, sextant_idx) == 0:
                     continue
             _display_cache[cell_key] = (bg, fg, sextant_idx)

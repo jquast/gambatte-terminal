@@ -120,6 +120,9 @@ def run(
     new_frame = False
     screen_ready = True
     frame_start_time = None
+    seen_size = (height, width)
+    last_resize_time: float | None = None
+    _RESIZE_DEBOUNCE = 0.05
 
     # Loop over emulator frames
     for i in count():
@@ -157,33 +160,43 @@ def run(
             if event.key == "<cursor-position-response>":
                 screen_ready = True
 
+        # Check terminal size (debounced)
+        current_size = app_session.output.get_size()
+        if current_size != seen_size:
+            seen_size = current_size
+            last_resize_time = time.time()
+
         # Render video
         with timing(video_deltas):
             # Send the frame
             shift = shifting and shifting[-1] > 1 / fps
             if i % frame_advance == 0 and new_frame and screen_ready and not shift:
                 new_frame = False
-                # Check terminal size
-                needs_clear = False
-                new_size = app_session.output.get_size()
-                if new_size != (height, width):
-                    needs_clear = True
-                    height, width = new_size
-                    if sextant is None:
-                        use_sextant = width < console.WIDTH + 6
-                        blit_fn = blit_sextant if use_sextant else blit
-                    refx, refy = get_ref(width, height, console, use_sextant)
-                    last_frame.fill(0xFFFFFFFF)
-                # Render frame
-                video_data = blit_fn(
-                    video, last_frame, refx, refy, width - 1, height, color_mode
-                )
-                if needs_clear:
-                    video_data = b"\033[H\033[2J" + video_data
-                last_frame = video.copy()
-                # Update reporting
-                data_length.append(len(video_data))
-                shown_frames.append(True)
+                # Apply resize once terminal size has been stable for 100ms
+                if last_resize_time is not None:
+                    if time.time() - last_resize_time >= _RESIZE_DEBOUNCE:
+                        height, width = seen_size
+                        if sextant is None:
+                            use_sextant = width < console.WIDTH + 6
+                            blit_fn = blit_sextant if use_sextant else blit
+                        refx, refy = get_ref(width, height, console, use_sextant)
+                        last_resize_time = None
+                        video_data = blit_fn(video, None, refx, refy, width - 1, height, color_mode)
+                        video_data = b"\033[H\033[2J" + video_data
+                        last_frame = video.copy()
+                        data_length.append(len(video_data))
+                        shown_frames.append(True)
+                    else:
+                        # Still debouncing - hold off rendering
+                        video_data = None
+                        data_length.append(0)
+                        shown_frames.append(False)
+                else:
+                    # Normal render
+                    video_data = blit_fn(video, last_frame, refx, refy, width - 1, height, color_mode)
+                    last_frame = video.copy()
+                    data_length.append(len(video_data))
+                    shown_frames.append(True)
             # Ignore this video frame
             else:
                 video_data = None

@@ -68,6 +68,8 @@ def local_blessed_input_context(
             if consumed == 0:
                 break
             buf = buf[consumed:]
+            if ks.name == "RESIZE_EVENT":
+                continue
             ch = str(ks)
             if ch == "\x03":
                 raise KeyboardInterrupt
@@ -79,6 +81,11 @@ def local_blessed_input_context(
             console.handle_event(event)
         return state.get_input()
 
-    with term.raw():
-        with term.enable_kitty_keyboard(disambiguate=True, report_events=True):
-            yield get_input
+    import contextlib
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(term.raw())
+        stack.enter_context(term.enable_kitty_keyboard(disambiguate=True, report_events=True))
+        if term.does_inband_resize():
+            stack.enter_context(term.notify_on_resize())
+        yield get_input

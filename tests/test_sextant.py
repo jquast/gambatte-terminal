@@ -10,9 +10,11 @@ import pytest
 from gambaterm.sextant import (
     SEXTANT,
     SEXTANT_BYTES,
+    _COLOR_PAIR_HYSTERESIS,
     _display_cache,
     _last_params,
     _hsv_distance,
+    _remap_index,
     _rgb_to_hsv,
     _select_bitonal_pair,
     _visual_pixel_diff,
@@ -150,6 +152,23 @@ class TestVisualPixelDiff:
         assert _visual_pixel_diff(0xAA, 0xAA, 0b000000, 0xAA, 0xAA, 0b111111) == 0
 
 
+class TestRemapIndex:
+    def test_all_bg(self) -> None:
+        assert _remap_index([0xFF0000] * 6, 0xFF0000, 0x0000FF) == 0
+
+    def test_all_fg(self) -> None:
+        assert _remap_index([0x0000FF] * 6, 0xFF0000, 0x0000FF) == 63
+
+    def test_first_pixel_fg(self) -> None:
+        pixels = [0x0000FF, 0xFF0000, 0xFF0000, 0xFF0000, 0xFF0000, 0xFF0000]
+        assert _remap_index(pixels, 0xFF0000, 0x0000FF) == 0b000001
+
+    def test_nearest_color_assignment(self) -> None:
+        # Pink is closer to red than blue
+        pixels = [0xFF8080, 0xFF0000, 0xFF0000, 0xFF0000, 0xFF0000, 0xFF0000]
+        assert _remap_index(pixels, 0xFF0000, 0x0000FF) == 0
+
+
 class TestHysteresis:
     def setup_method(self) -> None:
         _display_cache.clear()
@@ -195,6 +214,42 @@ class TestHysteresis:
         blit_sextant(image, None, 1, 1, 2, 2, 4)
         first_render = blit_sextant(image, None, 1, 1, 2, 2, 4)
         assert len(first_render) > len(b'\033[1;1H\033[0m')
+
+
+class TestColorPairHysteresis:
+    def setup_method(self) -> None:
+        _display_cache.clear()
+        _last_params.clear()
+
+    def test_slightly_different_colors_stabilize(self) -> None:
+        # Render cell with red bg, blue fg
+        image1 = np.full((6, 4), 0x00FF0000, np.uint32)
+        image1[0, 0] = 0x000000FF
+        blit_sextant(image1, None, 1, 1, 2, 2, 4)
+
+        # Next frame: nearly-identical blue (1 channel off)
+        image2 = image1.copy()
+        image2[0, 0] = 0x000001FF
+        blit_sextant(image2, image1, 1, 1, 2, 2, 4)
+
+        # Cache should still use original blue (stabilized)
+        cached = list(_display_cache.values())
+        assert any(v[1] == 0x0000FF for v in cached)
+
+    def test_large_color_change_adopts_new_colors(self) -> None:
+        # Render cell with red bg, blue fg
+        image1 = np.full((6, 4), 0x00FF0000, np.uint32)
+        image1[0, 0] = 0x000000FF
+        blit_sextant(image1, None, 1, 1, 2, 2, 4)
+
+        # Next frame: fg changes to green (far from blue)
+        image2 = image1.copy()
+        image2[0, 0] = 0x0000FF00
+        blit_sextant(image2, image1, 1, 1, 2, 2, 4)
+
+        # Cache should have updated to green
+        cached = list(_display_cache.values())
+        assert any(v[1] == 0x00FF00 for v in cached)
 
 
 class TestBlitSextant:
