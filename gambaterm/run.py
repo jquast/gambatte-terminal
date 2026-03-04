@@ -145,9 +145,13 @@ def run(
     # Back off if sweep time grows beyond this multiple of the RTT floor.
     _RAMP_MAX_FRAMES = 8         # never pipeline more than this many frames
     _RAMP_BLOAT_FACTOR = 3.0     # back off ramp if sweep_tx > rtt_floor * this
+    _INITIAL_FPS_TARGET = 20
+    _BOOTSTRAP_BW_BPS = 2_000_000  # 2 Mbit/s conservative seed so NUL pacing starts immediately
     ramp_frames: int = 0         # extra frames added by ramp (starts conservative)
-    fast_bw_ema = cpr_bandwidth_bps
-    slow_bw_ema = cpr_bandwidth_bps
+    fast_bw_ema = cpr_bandwidth_bps if cpr_bandwidth_bps > 0 else (
+        _BOOTSTRAP_BW_BPS if cpr_rtt_floor > 0 else 0.0
+    )
+    slow_bw_ema = fast_bw_ema
     frames_per_sweep = 1
     frames_since_cpr = 0
     cpr_sent_at: float | None = None
@@ -156,6 +160,9 @@ def run(
     if cpr_bandwidth_bps > 0 and cpr_rtt_floor > 0:
         sweep_budget = cpr_bandwidth_bps * cpr_rtt_floor * _SWEEP_WINDOW / 8
         frames_per_sweep = max(1, int(sweep_budget / _CONSERVATIVE_FRAME_BYTES))
+    elif cpr_rtt_floor > 0:
+        # No bandwidth calibration; start at ~20 FPS and let the ramp adapt.
+        frames_per_sweep = max(1, round(cpr_rtt_floor * _INITIAL_FPS_TARGET))
 
     # Loop over emulator frames
     for i in count():
@@ -230,6 +237,14 @@ def run(
                 frames_since_cpr = 0
                 cpr_bytes_in_sweep = 0
                 cpr_sent_at = None
+
+        # Dead-connection guard: if CPR hasn't come back within a generous
+        # multiple of the RTT floor, the client is gone.
+        if cpr_sent_at is not None and use_cpr_sync:
+            cpr_wait = time.perf_counter() - cpr_sent_at
+            timeout = max(10.0, cpr_rtt_floor * 20) if cpr_rtt_floor > 0 else 10.0
+            if cpr_wait > timeout:
+                raise OSError("CPR timeout — client appears disconnected")
 
         # Check terminal size (debounced)
         current_size = app_session.output.get_size()

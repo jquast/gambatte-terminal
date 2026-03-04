@@ -303,19 +303,7 @@ async def _calibrate_connection(
         bw_samples.sort()
         bandwidth_bps = bw_samples[len(bw_samples) // 2]  # median
 
-    if bandwidth_bps > 0 and rtt_floor > 0:
-        # Half-RTT window in bytes / conservative initial frame size estimate
-        sweep_budget = bandwidth_bps * rtt_floor / 2 / 8
-        conservative_frame_bytes = 15_000  # ~15 KB; refined at runtime from history
-        frames_per_sweep = max(1, int(sweep_budget / conservative_frame_bytes))
-    else:
-        frames_per_sweep = 1
-
-    print(
-        f"[Calibrate {host}] RTT floor: {rtt_floor * 1000:.1f}ms, "
-        f"bandwidth: {bandwidth_bps / 1_000_000:.2f} Mbit/s, "
-        f"frames_per_sweep: {frames_per_sweep}"
-    )
+    print(f"[Calibrate {host}] RTT floor: {rtt_floor * 1000:.1f}ms")
     return rtt_floor, bandwidth_bps
 
 
@@ -499,17 +487,12 @@ async def _telnet_shell(
             if await _detect_true_color_telnet(reader, writer):
                 color_mode = ColorMode.HAS_24_BIT_COLOR
 
-        # Measure RTT floor and bandwidth for adaptive sweep-based flow control
+        # Measure RTT floor only — bandwidth is estimated adaptively during play.
         if getattr(app_config, 'no_calibrate', False):
             rtt_floor, bandwidth_bps = 0.0, 0.0
         else:
-            import random
-            from telnetlib3.accessories import PATIENCE_MESSAGES
-            patience = random.choice(PATIENCE_MESSAGES)
-            writer.write(f"{patience}...\r\n".encode("utf-8"))  # type: ignore[union-attr]
-            await writer.drain()  # type: ignore[union-attr]
             rtt_floor, bandwidth_bps = await _calibrate_connection(
-                reader, writer, host=peer_host
+                reader, writer, host=peer_host, rtt_probes=2, bulk_sizes=()
             )
 
         height, width = app_session.output.get_size()
