@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import sys
 import time
-import statistics
 import contextlib
 from itertools import count
 from collections import deque
@@ -137,9 +136,12 @@ def run(
     _SAFETY_FACTOR = 0.85    # conservative headroom to avoid overfilling buffers
     _SWEEP_WINDOW = 0.5      # fraction of RTT to fill per sweep (half-RTT)
     _MIN_OVERHEAD_S = 0.010  # ignore CPR cycles shorter than 10 ms (measurement noise)
-    _FRAME_SIZE_P95_SIGMAS = 2   # mean + N*sigma ≈ p95 of frame size distribution
-    _FRAME_HISTORY_LEN = 300     # ~30 s at ~10 fps; long window for stable VBR estimate
     _CONSERVATIVE_FRAME_BYTES = 15_000  # initial frame-size estimate before history fills
+    # Dual EWMA for frame size: fast reacts to scroll/scene bursts, slow tracks
+    # sustained complexity.  p95 ≈ slow_mean + (fast_mean - slow_mean) headroom,
+    # clamped to at least the fast mean so sudden spikes are respected immediately.
+    _FRAME_SIZE_FAST_ALPHA = 0.25
+    _FRAME_SIZE_SLOW_ALPHA = 0.05
     # Opportunistic ramp: if RTT overhead is small relative to transmission time
     # (bandwidth-limited regime), try pipelining an extra frame to amortize RTT wait.
     # Back off if sweep time grows beyond this multiple of the RTT floor.
@@ -156,7 +158,8 @@ def run(
     frames_since_cpr = 0
     cpr_sent_at: float | None = None
     cpr_bytes_in_sweep = 0
-    frame_size_history: Deque[int] = deque(maxlen=_FRAME_HISTORY_LEN)
+    frame_size_fast_ema: float = _CONSERVATIVE_FRAME_BYTES
+    frame_size_slow_ema: float = _CONSERVATIVE_FRAME_BYTES
     if cpr_bandwidth_bps > 0 and cpr_rtt_floor > 0:
         sweep_budget = cpr_bandwidth_bps * cpr_rtt_floor * _SWEEP_WINDOW / 8
         frames_per_sweep = max(1, int(sweep_budget / _CONSERVATIVE_FRAME_BYTES))
@@ -203,8 +206,7 @@ def run(
                     elapsed = time.perf_counter() - cpr_sent_at
                     if live_stats is not None:
                         live_stats.rtt_ms = elapsed * 1000
-                    if (cpr_bytes_in_sweep > 0
-                            and cpr_rtt_floor > 0 and cpr_bandwidth_bps > 0):
+                    if cpr_bytes_in_sweep > 0 and cpr_rtt_floor > 0:
                         # Subtract RTT floor to isolate transmission time
                         overhead = elapsed - cpr_rtt_floor
                         if live_stats is not None:
@@ -217,13 +219,11 @@ def run(
                             # Use the lower of the two EMAs for a conservative estimate
                             safe_bw = min(fast_bw_ema, slow_bw_ema) * _SAFETY_FACTOR
                             sweep_budget = safe_bw * cpr_rtt_floor * _SWEEP_WINDOW / 8
-                            if frame_size_history:
-                                mean_dl = statistics.mean(frame_size_history)
-                                stdev_dl = (statistics.stdev(frame_size_history)
-                                            if len(frame_size_history) > 1 else mean_dl)
-                                # p95 approximation: absorbs VBR burst frames
-                                p95 = mean_dl + _FRAME_SIZE_P95_SIGMAS * stdev_dl
-                                frames_per_sweep = max(1, int(sweep_budget / p95))
+                            # p95 proxy: use the faster EMA as a burst-aware ceiling.
+                            # When the scene gets complex (scroll/cutscene), fast_ema
+                            # jumps within a few frames; slow_ema tracks the baseline.
+                            p95 = max(frame_size_fast_ema, frame_size_slow_ema)
+                            frames_per_sweep = max(1, int(sweep_budget / p95))
                             # Opportunistic ramp: in BW-limited regime (overhead >> RTT floor),
                             # each extra frame amortises one CPR wait.  Grow ramp_frames by 1
                             # when the last sweep was clean; shrink when tx >> RTT floor * bloat.
@@ -290,7 +290,9 @@ def run(
                 shown_frames.append(False)
 
         if video_data:
-            frame_size_history.append(len(video_data))
+            n = len(video_data)
+            frame_size_fast_ema = (1 - _FRAME_SIZE_FAST_ALPHA) * frame_size_fast_ema + _FRAME_SIZE_FAST_ALPHA * n
+            frame_size_slow_ema = (1 - _FRAME_SIZE_SLOW_ALPHA) * frame_size_slow_ema + _FRAME_SIZE_SLOW_ALPHA * n
 
         with timing(sync_deltas):
             # Video sync
@@ -299,10 +301,10 @@ def run(
                 write_bytes(app_session, b"\033[?2026h" + video_data + b"\033[?2026l")
                 # NUL inter-frame pacing: pad frame to fill one bandwidth-slot so consecutive
                 # frames arrive at the terminal spaced by 1/target_fps seconds.
-                if use_cpr_sync and fast_bw_ema > 0 and frame_size_history:
+                if use_cpr_sync and fast_bw_ema > 0:
                     capped_bw = min(fast_bw_ema, max_bw_bps) if max_bw_bps > 0 else fast_bw_ema
                     bw_bytes_per_sec = capped_bw / 8
-                    mean_bytes = statistics.mean(frame_size_history)
+                    mean_bytes = frame_size_slow_ema
                     bw_fps_cap = bw_bytes_per_sec / mean_bytes
                     target_fps_for_pacing = min(fps / frame_advance, bw_fps_cap)
                     slot_bytes = int(bw_bytes_per_sec / target_fps_for_pacing)
@@ -341,14 +343,8 @@ def run(
                 live_stats.frames_per_sweep = frames_per_sweep
                 live_stats.fast_bw_mbps = fast_bw_ema / 1_000_000
                 live_stats.slow_bw_mbps = slow_bw_ema / 1_000_000
-                if frame_size_history:
-                    mean_dl = statistics.mean(frame_size_history)
-                    stdev_dl = (statistics.stdev(frame_size_history)
-                                if len(frame_size_history) > 1 else mean_dl)
-                    live_stats.frame_mean_bytes = int(mean_dl)
-                    live_stats.frame_p95_bytes = int(
-                        mean_dl + _FRAME_SIZE_P95_SIGMAS * stdev_dl
-                    )
+                live_stats.frame_mean_bytes = int(frame_size_slow_ema)
+                live_stats.frame_p95_bytes = int(frame_size_fast_ema)
             emu_percent = sum(emu_deltas) / len(emu_deltas) * total_fps * 100
             audio_percent = sum(audio_deltas) / len(audio_deltas) * total_fps * 100
             video_percent = sum(video_deltas) / len(video_deltas) * total_fps * 100
