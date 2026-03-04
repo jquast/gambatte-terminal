@@ -12,7 +12,6 @@ from gambaterm.sextant import (
     SEXTANT_BYTES,
     _display_cache,
     _last_params,
-    _suppressed,
     _hsv_distance,
     _rgb_to_hsv,
     _select_bitonal_pair,
@@ -154,7 +153,6 @@ class TestVisualPixelDiff:
 class TestHysteresis:
     def setup_method(self) -> None:
         _display_cache.clear()
-        _suppressed.clear()
         _last_params.clear()
 
     def test_same_frame_suppressed(self) -> None:
@@ -164,18 +162,15 @@ class TestHysteresis:
         result = blit_sextant(image, image, 1, 1, 2, 2, 4)
         assert result == b'\033[1;1H\033[0m'
 
-    def test_one_pixel_change_suppressed_once(self) -> None:
+    def test_one_pixel_change_renders_immediately(self) -> None:
         image1 = np.full((6, 4), 0x00FF0000, np.uint32)
         image1[0, 0] = 0x000000FF
         blit_sextant(image1, None, 1, 1, 2, 2, 4)
 
         image2 = image1.copy()
         image2[1, 0] = 0x000000FF
-        r1 = blit_sextant(image2, image1, 1, 1, 2, 2, 4)
-        assert r1 == b'\033[1;1H\033[0m'
-
-        r2 = blit_sextant(image2, image2, 1, 1, 2, 2, 4)
-        assert len(r2) > len(b'\033[1;1H\033[0m')
+        result = blit_sextant(image2, image1, 1, 1, 2, 2, 4)
+        assert len(result) > len(b'\033[1;1H\033[0m')
 
     def test_two_pixel_change_renders(self) -> None:
         image1 = np.full((6, 4), 0x00FF0000, np.uint32)
@@ -186,18 +181,6 @@ class TestHysteresis:
         image2[0, 1] = 0x000000FF
         result = blit_sextant(image2, image1, 1, 1, 2, 2, 4)
         assert len(result) > len(b'\033[1;1H\033[0m')
-
-    def test_suppressed_cell_not_stuck(self) -> None:
-        image1 = np.full((6, 4), 0x00FF0000, np.uint32)
-        blit_sextant(image1, None, 1, 1, 2, 2, 4)
-
-        image2 = image1.copy()
-        image2[0, 0] = 0x000000FF
-        r1 = blit_sextant(image2, image1, 1, 1, 2, 2, 4)
-        assert r1 == b'\033[1;1H\033[0m'
-
-        r2 = blit_sextant(image2, image2, 1, 1, 2, 2, 4)
-        assert len(r2) > len(b'\033[1;1H\033[0m')
 
     def test_resize_clears_cache(self) -> None:
         image = np.full((6, 4), 0x00FF0000, np.uint32)
@@ -217,7 +200,6 @@ class TestHysteresis:
 class TestBlitSextant:
     def setup_method(self) -> None:
         _display_cache.clear()
-        _suppressed.clear()
         _last_params.clear()
 
     def test_solid_frame_returns_bytes(self) -> None:

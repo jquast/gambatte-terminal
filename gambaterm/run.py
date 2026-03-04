@@ -36,8 +36,10 @@ def get_ref(
     else:
         rows = console.HEIGHT // 2
         cols = console.WIDTH
-    refx = 2 + max(0, (height - rows) // 2)
-    refy = 3 + max(0, (width - cols) // 2)
+    margin_x = min(2, max(0, height - rows))
+    margin_y = min(3, max(0, width - cols - 1))
+    refx = margin_x + max(0, (height - margin_x - rows) // 2)
+    refy = margin_y + max(0, (width - margin_y - cols) // 2)
     return refx, refy
 
 
@@ -162,10 +164,10 @@ def run(
             if i % frame_advance == 0 and new_frame and screen_ready and not shift:
                 new_frame = False
                 # Check terminal size
+                needs_clear = False
                 new_size = app_session.output.get_size()
                 if new_size != (height, width):
-                    app_session.output.erase_screen()
-                    app_session.output.flush()
+                    needs_clear = True
                     height, width = new_size
                     if sextant is None:
                         use_sextant = width < console.WIDTH + 6
@@ -176,6 +178,8 @@ def run(
                 video_data = blit_fn(
                     video, last_frame, refx, refy, width - 1, height, color_mode
                 )
+                if needs_clear:
+                    video_data = b"\033[H\033[2J" + video_data
                 last_frame = video.copy()
                 # Update reporting
                 data_length.append(len(video_data))

@@ -226,7 +226,6 @@ def _select_bitonal_pair(pixels: list[int]) -> tuple[int, int, int]:
 # ---------------------------------------------------------------------------
 
 _display_cache: dict[tuple[int, int], tuple[int, int, int]] = {}
-_suppressed: set[tuple[int, int]] = set()
 _last_params: list[int] = []
 
 
@@ -284,7 +283,6 @@ def blit_sextant(
     params = [refx, refy, max_rows, max_cols]
     if last is None or params != _last_params:
         _display_cache.clear()
-        _suppressed.clear()
         _last_params[:] = params
 
     parts: list[bytes] = []
@@ -313,22 +311,13 @@ def blit_sextant(
 
             bg, fg, sextant_idx = _select_bitonal_pair(pixels)
 
-            # Visual delta hysteresis: suppress if <=1 displayed pixel changed,
-            # but only for one frame — a second consecutive suppression forces render.
+            # Skip render if the quantized visual output is completely unchanged.
             cell_key = (row, col)
             prev = _display_cache.get(cell_key)
             if prev is not None:
                 prev_bg, prev_fg, prev_idx = prev
-                diff = _visual_pixel_diff(
-                    prev_bg, prev_fg, prev_idx, bg, fg, sextant_idx,
-                )
-                if diff == 0:
-                    _suppressed.discard(cell_key)
+                if _visual_pixel_diff(prev_bg, prev_fg, prev_idx, bg, fg, sextant_idx) == 0:
                     continue
-                if diff <= 1 and cell_key not in _suppressed:
-                    _suppressed.add(cell_key)
-                    continue
-            _suppressed.discard(cell_key)
             _display_cache[cell_key] = (bg, fg, sextant_idx)
 
             # Move cursor to cell position
