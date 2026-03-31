@@ -107,8 +107,8 @@ SSH server
 It is possible to serve the emulation through SSH. Clients must use a terminal that supports the [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/), or use X11 forwarding (`ssh -X`) as a fallback. Use `gambaterm-ssh --help` for more information. 24-bit color is always assumed over SSH. Audio is not available over SSH.
 
 ```shell
-$ gambaterm-ssh --password 123 myrom.gbc
-$ gambaterm-ssh --password 123 --bind 0.0.0.0 --port 8022 myrom.gbc  # Listen on all interfaces
+$ gambaterm-ssh --password '' myrom.gbc  # with no password (press return if prompted)
+$ gambaterm-ssh --password '' --bind 0.0.0.0 --port 8022 myrom.gbc  # Listen on all interfaces
 ```
 
 Connect with ssh client:
